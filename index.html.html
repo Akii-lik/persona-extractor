@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>人设提取器</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --border:#2a2e38; --text:#e6e8eb;
+    --muted:#8b909c; --accent:#7c9eff; --accent2:#5b7fe0; --danger:#e0625b; --ok:#6bbf8a;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    background:var(--bg); color:var(--text); padding:24px;
+  }
+  .wrap{max-width:880px; margin:0 auto;}
+  h1{font-size:20px; font-weight:600; margin-bottom:4px;}
+  .sub{color:var(--muted); font-size:13px; margin-bottom:24px;}
+  .panel{
+    background:var(--panel); border:1px solid var(--border); border-radius:10px;
+    padding:18px; margin-bottom:16px;
+  }
+  .panel h2{font-size:14px; margin:0 0 12px; color:var(--accent); font-weight:600;}
+  label{display:block; font-size:12px; color:var(--muted); margin-bottom:4px; margin-top:10px;}
+  label:first-child{margin-top:0;}
+  input, select, textarea{
+    width:100%; background:#0d0f14; border:1px solid var(--border); color:var(--text);
+    padding:9px 10px; border-radius:6px; font-size:13px; font-family:inherit;
+  }
+  input:focus, select:focus, textarea:focus{outline:none; border-color:var(--accent);}
+  textarea{resize:vertical; min-height:140px; line-height:1.5;}
+  .row{display:flex; gap:12px;}
+  .row > div{flex:1;}
+  .hint{font-size:11px; color:var(--muted); margin-top:4px;}
+  button{
+    background:var(--accent2); color:#fff; border:none; padding:10px 18px;
+    border-radius:6px; font-size:13px; cursor:pointer; font-weight:500;
+  }
+  button:hover{background:var(--accent);}
+  button:disabled{background:#3a3d45; cursor:not-allowed;}
+  button.ghost{background:transparent; border:1px solid var(--border); color:var(--text);}
+  button.ghost:hover{background:#1f232c;}
+  .actions{display:flex; gap:10px; align-items:center; margin-top:14px;}
+  .status{font-size:12px; color:var(--muted);}
+  .status.ok{color:var(--ok);}
+  .status.err{color:var(--danger);}
+  .progress-bar{
+    height:6px; background:#0d0f14; border-radius:3px; overflow:hidden; margin-top:10px;
+    border:1px solid var(--border);
+  }
+  .progress-fill{height:100%; background:var(--accent2); width:0%; transition:width .3s;}
+  .log{
+    font-size:11px; color:var(--muted); max-height:140px; overflow-y:auto;
+    margin-top:10px; font-family:ui-monospace,monospace; line-height:1.6;
+    background:#0d0f14; border-radius:6px; padding:8px; display:none;
+  }
+  .log.show{display:block;}
+  .log div{white-space:pre-wrap;}
+  #output{min-height:280px; font-family:ui-monospace,monospace; font-size:12.5px;}
+  .toggle-link{font-size:12px; color:var(--accent); cursor:pointer; text-decoration:underline; margin-top:8px; display:inline-block;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>人设提取器</h1>
+  <div class="sub">把聊天记录分块提炼,生成可直接用作 system prompt 的人设描述。自己接 API。</div>
+
+  <div class="panel">
+    <h2>① API 接入</h2>
+    <label>API Base URL(不带 /chat/completions,例如 https://openrouter.ai/api/v1)</label>
+    <input id="apiUrl" type="text" placeholder="https://openrouter.ai/api/v1" value="https://openrouter.ai/api/v1">
+    <label>API Key</label>
+    <input id="apiKey" type="password" placeholder="sk-...">
+    <div class="actions" style="margin-top:10px;">
+      <button class="ghost" onclick="fetchModels()">检测可用模型</button>
+      <span class="status" id="modelStatus"></span>
+    </div>
+    <label style="margin-top:14px;">模型</label>
+    <select id="apiModel">
+      <option value="">先点上面"检测可用模型",或手动输入↓</option>
+    </select>
+    <input id="apiModelManual" type="text" placeholder="也可以直接手动输入模型名(优先级高于下拉框)" style="margin-top:6px;">
+    <div class="hint">默认按 OpenAI 兼容格式发请求(Authorization: Bearer,GET {base}/models 检测模型,POST {base}/chat/completions 对话),适配 OpenRouter / OpenAI / 大部分中转站。格式不同的话改下方 buildRequestBody() / parseResponse() / parseModelList() 这三个函数,代码里标了位置。</div>
+  </div>
+
+  <div class="panel">
+    <h2>② 聊天记录</h2>
+    <label>粘贴文本,或选择 .txt 文件</label>
+    <input id="fileInput" type="file" accept=".txt,.md,.json">
+    <textarea id="chatText" placeholder="粘贴聊天记录..."></textarea>
+    <div class="hint" id="charCount">0 字</div>
+  </div>
+
+  <div class="panel">
+    <h2>③ 分块设置</h2>
+    <div class="row">
+      <div>
+        <label>每块字数</label>
+        <input id="chunkSize" type="number" value="60000">
+      </div>
+      <div>
+        <label>分析角度(可改)</label>
+        <input id="focusHint" type="text" value="性格特征、说话方式、价值观倾向、情绪反应模式、对你的态度">
+      </div>
+    </div>
+  </div>
+
+  <div class="actions">
+    <button id="runBtn" onclick="runPipeline()">开始提取</button>
+    <button class="ghost" onclick="toggleLog()">显示日志</button>
+    <span class="status" id="statusText"></span>
+  </div>
+  <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+  <div class="log" id="logBox"></div>
+
+  <div class="panel" style="margin-top:20px;">
+    <h2>中间结果(分块提炼,实时保存)</h2>
+    <div class="hint">跑的过程中实时往这里写,哪怕后面报错了,这里已经跑完的部分也不会丢,可以直接复制或下载。</div>
+    <textarea id="intermediateOutput" readonly style="margin-top:8px; min-height:160px;"></textarea>
+    <div class="actions">
+      <button class="ghost" onclick="downloadIntermediate()">下载中间结果 .txt</button>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-top:20px;">
+    <h2>④ 结果(可编辑)</h2>
+    <textarea id="output" placeholder="提取结果会显示在这里..."></textarea>
+    <div class="actions">
+      <button class="ghost" onclick="copyOutput()">复制</button>
+      <button class="ghost" onclick="downloadOutput()">下载 .txt</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let chatContent = "";
+
+document.getElementById('chatText').addEventListener('input', (e) => {
+  chatContent = e.target.value;
+  updateCharCount();
+});
+
+document.getElementById('fileInput').addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (evt) => {
+    document.getElementById('chatText').value = evt.target.result;
+    chatContent = evt.target.result;
+    updateCharCount();
+  };
+  reader.readAsText(file);
+});
+
+function updateCharCount(){
+  document.getElementById('charCount').textContent = chatContent.length + ' 字';
+}
+
+function toggleLog(){
+  document.getElementById('logBox').classList.toggle('show');
+}
+
+function log(msg){
+  const box = document.getElementById('logBox');
+  const line = document.createElement('div');
+  line.textContent = msg;
+  box.appendChild(line);
+  box.scrollTop = box.scrollHeight;
+}
+
+function setStatus(text, type){
+  const el = document.getElementById('statusText');
+  el.textContent = text;
+  el.className = 'status' + (type ? ' ' + type : '');
+}
+
+function setProgress(pct){
+  document.getElementById('progressFill').style.width = pct + '%';
+}
+
+// ============ 这两个函数按你的 API 服务商格式改 ============
+
+function buildRequestBody(model, systemPrompt, userPrompt){
+  return JSON.stringify({
+    model: model,
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt }
+    ],
+    max_tokens: 2000
+  });
+}
+
+function parseResponse(data){
+  // OpenAI 兼容格式: data.choices[0].message.content
+  if (data.choices && data.choices[0] && data.choices[0].message) {
+    return data.choices[0].message.content;
+  }
+  // 兜底:尝试 Anthropic 原生格式 data.content[0].text
+  if (data.content && data.content[0] && data.content[0].text) {
+    return data.content[0].text;
+  }
+  throw new Error("无法解析返回格式,请检查 parseResponse() 函数");
+}
+
+// =========================================================
+
+function getBaseUrl(){
+  return document.getElementById('apiUrl').value.trim().replace(/\/+$/, '');
+}
+
+function getSelectedModel(){
+  const manual = document.getElementById('apiModelManual').value.trim();
+  if (manual) return manual;
+  return document.getElementById('apiModel').value.trim();
+}
+
+function parseModelList(data){
+  // OpenAI 兼容格式: data.data 是数组,每项有 id 字段
+  if (Array.isArray(data.data)) {
+    return data.data.map(m => m.id).filter(Boolean);
+  }
+  // 兜底:有些服务商直接返回数组
+  if (Array.isArray(data)) {
+    return data.map(m => m.id || m.name || m).filter(Boolean);
+  }
+  throw new Error("无法解析模型列表格式,请检查 parseModelList() 函数");
+}
+
+async function fetchModels(){
+  const base = getBaseUrl();
+  const key = document.getElementById('apiKey').value.trim();
+  const statusEl = document.getElementById('modelStatus');
+  const select = document.getElementById('apiModel');
+
+  if (!base || !key) {
+    statusEl.textContent = "请先填写 URL 和 Key";
+    statusEl.className = 'status err';
+    return;
+  }
+
+  statusEl.textContent = "检测中...";
+  statusEl.className = 'status';
+
+  try {
+    const resp = await fetch(base + '/models', {
+      headers: { "Authorization": "Bearer " + key }
+    });
+    if (!resp.ok) {
+      const t = await resp.text();
+      throw new Error(resp.status + ': ' + t.slice(0, 200));
+    }
+    const data = await resp.json();
+    const models = parseModelList(data).sort();
+
+    select.innerHTML = '';
+    if (models.length === 0) {
+      select.innerHTML = '<option value="">未检测到模型,改用手动输入</option>';
+      statusEl.textContent = "没检测到模型";
+      statusEl.className = 'status err';
+      return;
+    }
+    models.forEach(id => {
+      const opt = document.createElement('option');
+      opt.value = id;
+      opt.textContent = id;
+      select.appendChild(opt);
+    });
+    statusEl.textContent = `检测到 ${models.length} 个模型`;
+    statusEl.className = 'status ok';
+  } catch (err) {
+    statusEl.textContent = "检测失败: " + err.message;
+    statusEl.className = 'status err';
+    log("模型检测失败: " + err.message + "(可以改用手动输入模型名)");
+  }
+}
+
+async function callLLM(systemPrompt, userPrompt, retries){
+  if (retries === undefined) retries = 3;
+  const base = getBaseUrl();
+  const key = document.getElementById('apiKey').value.trim();
+  const model = getSelectedModel();
+
+  if (!base || !key || !model) {
+    throw new Error("请先填写 API URL / Key,并选择或输入模型名");
+  }
+
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const resp = await fetch(base + '/chat/completions', {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer " + key
+        },
+        body: buildRequestBody(model, systemPrompt, userPrompt)
+      });
+
+      if (resp.status === 429 || resp.status >= 500) {
+        const waitMs = Math.min(2000 * Math.pow(2, attempt), 20000);
+        lastErr = new Error(`限流或服务端错误 (${resp.status}),${waitMs/1000}秒后重试`);
+        if (attempt < retries) {
+          log(`⚠ ${lastErr.message} (第${attempt+1}次重试)`);
+          await sleep(waitMs);
+          continue;
+        }
+        throw lastErr;
+      }
+
+      if (!resp.ok) {
+        const errText = await resp.text();
+        throw new Error("API 请求失败 (" + resp.status + "): " + errText.slice(0, 300));
+      }
+
+      const data = await resp.json();
+      return parseResponse(data);
+
+    } catch (err) {
+      lastErr = err;
+      if (err.name === 'TypeError' && attempt < retries) {
+        // 网络层错误(比如断网/CORS),也重试一下
+        const waitMs = 2000 * (attempt + 1);
+        log(`⚠ 网络错误,${waitMs/1000}秒后重试: ${err.message}`);
+        await sleep(waitMs);
+        continue;
+      }
+      throw lastErr;
+    }
+  }
+  throw lastErr;
+}
+
+function sleep(ms){
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function splitIntoChunks(text, chunkSize){
+  const chunks = [];
+  for (let i = 0; i < text.length; i += chunkSize) {
+    chunks.push(text.slice(i, i + chunkSize));
+  }
+  return chunks;
+}
+
+function chunkExtractPrompt(focusHint){
+  return `你在帮用户从一段聊天记录中提炼某个角色/对方的人设特征。
+重点分析维度:${focusHint}。
+要求:
+- 必须给出具体例子(原文片段或转述),不要只给空泛的形容词
+- 如果这一段信息量很少或与人设无关,直接说"本段无显著人设信息"
+- 用简洁的要点列出,不要写成完整段落
+直接输出分析结果,不要任何开场白。`;
+}
+
+function aggregatePrompt(focusHint){
+  return `下面是多段聊天记录分别提炼出的人设要点。请你跨段归纳,找出反复出现、稳定存在的特征(偶发的、只出现一次的不算)。
+重点维度:${focusHint}。
+对每个特征标注大致出现频率(高/中/低),并保留最有代表性的例子。
+直接输出归纳结果,不要开场白。`;
+}
+
+function finalPersonaPrompt(){
+  return `把下面的人设要点,改写成一段连贯的角色人设描述,适合直接放进 AI 角色扮演的 system prompt 里使用。
+要求:
+- 控制在400-700字
+- 用描述性的语言写出这个人是什么样的、怎么说话、怎么待人,而不是罗列标签
+- 不要分点,写成几段自然的文字
+- 不要加任何解释或开场白,直接给出最终人设文本`;
+}
+
+async function runPipeline(){
+  const runBtn = document.getElementById('runBtn');
+  const text = document.getElementById('chatText').value;
+  const chunkSize = parseInt(document.getElementById('chunkSize').value) || 60000;
+  const focusHint = document.getElementById('focusHint').value;
+
+  if (!text.trim()) {
+    setStatus("请先粘贴或上传聊天记录", "err");
+    return;
+  }
+
+  runBtn.disabled = true;
+  document.getElementById('output').value = "";
+  document.getElementById('logBox').innerHTML = "";
+  setProgress(0);
+
+  try {
+    const chunks = splitIntoChunks(text, chunkSize);
+    log(`共切成 ${chunks.length} 块,每块约 ${chunkSize} 字`);
+    setStatus(`第一轮:逐块提炼 (0/${chunks.length})`);
+
+    const chunkResults = [];
+    const interBox = document.getElementById('intermediateOutput');
+    interBox.value = '';
+    for (let i = 0; i < chunks.length; i++) {
+      setStatus(`第一轮:逐块提炼 (${i+1}/${chunks.length})`);
+      log(`处理第 ${i+1} 块...`);
+      const result = await callLLM(chunkExtractPrompt(focusHint), chunks[i]);
+      chunkResults.push(result);
+      interBox.value += `【第${i+1}块】\n${result}\n\n`;
+      interBox.scrollTop = interBox.scrollHeight;
+      setProgress(((i+1) / chunks.length) * 50);
+    }
+
+    log("第一轮完成,开始跨块归纳...");
+    setStatus("第二轮:归纳稳定特征");
+    const combined = chunkResults.map((r, i) => `【第${i+1}块】\n${r}`).join("\n\n");
+    const aggregated = await callLLM(aggregatePrompt(focusHint), combined);
+    setProgress(75);
+
+    log("归纳完成,生成最终人设文本...");
+    setStatus("第三轮:生成最终人设");
+    const finalPersona = await callLLM(finalPersonaPrompt(), aggregated);
+    setProgress(100);
+
+    document.getElementById('output').value = finalPersona;
+    setStatus("完成", "ok");
+    log("✓ 全部完成");
+
+  } catch (err) {
+    setStatus("出错: " + err.message, "err");
+    log("✗ " + err.message);
+  } finally {
+    runBtn.disabled = false;
+  }
+}
+
+function downloadIntermediate(){
+  const text = document.getElementById('intermediateOutput').value;
+  if (!text) return;
+  const blob = new Blob([text], {type: 'text/plain;charset=utf-8'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'intermediate_results.txt';
+  a.click();
+}
+
+function copyOutput(){
+  const out = document.getElementById('output');
+  out.select();
+  document.execCommand('copy');
+  setStatus("已复制", "ok");
+}
+
+function downloadOutput(){
+  const text = document.getElementById('output').value;
+  if (!text) return;
+  const blob = new Blob([text], {type: 'text/plain;charset=utf-8'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'persona.txt';
+  a.click();
+}
+</script>
+</body>
+</html>
